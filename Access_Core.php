@@ -13,6 +13,7 @@ class Access_Core
     public $config;
     public $action;
     public $title;
+    public $maybad = array();
     public $logs = array();
     public $overview = array();
     public $referer = array();
@@ -47,6 +48,11 @@ class Access_Core
                 $this->parseOverview();
                 $this->parseReferer();
                 break;
+            case 'maybad':
+                $this->action = 'maybad';
+                $this->title = _t('疑似恶意访问');
+                $this->parseBadLogs();
+                break;
             case 'logs':
             default:
                 $this->action = 'logs';
@@ -54,6 +60,103 @@ class Access_Core
                 $this->parseLogs();
                 break;
         }
+    }
+
+    
+
+    /**
+     * 生成疑似恶意访问数据，提供给页面渲染使用
+     * todo 功能暂未完善，能先临时用着了
+     *
+     * @access public
+     * @return void
+     */
+    protected function parseBadLogs()
+    {
+        $type = $this->request->get('type', 1);
+        $filter = $this->request->get('filter', 'path');
+        $pagenum = $this->request->get('page', 1);
+        $offset = (max(intval($pagenum), 1) - 1) * $this->config->pageSize;
+        $query = $this->db->select()->from('table.access_log')
+            ->order('time', Typecho_Db::SORT_DESC)
+            ->offset($offset)->limit($this->config->pageSize);
+        $qcount = $this->db->select('count(1) AS count')->from('table.access_log');
+        switch ($type) {
+            case 1:
+                $query->where('robot = ?', 0);
+                $qcount->where('robot = ?', 0);
+                break;
+            case 2:
+                $query->where('robot = ?', 1);
+                $qcount->where('robot = ?', 1);
+                break;
+            default:
+                break;
+        }
+        switch ($filter) {
+            case 'ip':
+                $ip = $this->request->get('ip', '');
+                $ip = bindec(decbin(ip2long($ip)));
+                $query->where('ip = ?', $ip);
+                $qcount->where('ip = ?', $ip);
+                break;
+            case 'post':
+                $cid = $this->request->get('cid', '');
+                $query->where('content_id = ?', $cid);
+                $qcount->where('content_id = ?', $cid);
+                break;
+            case 'path':
+                // 默认设置'wp'，因为许多恶意访问都是在探测wordpress的路径
+                // 后续考虑增加一个通过插件支持设置页面，自行输入参数来匹配的方式
+                $path = $this->request->get('path', 'wp');
+                // 由原来的精确匹配改为模糊匹配
+                $query->where('path like ?', '%'.$path.'%');
+                $qcount->where('path like ?', '%'.$path.'%');
+                break;
+        }
+        $list = $this->db->fetchAll($query);
+        foreach ($list as &$row) {
+            $ua = new Access_UA($row['ua']);
+            if ($ua->isRobot()) {
+                $name = $ua->getRobotID();
+                $version = $ua->getRobotVersion();
+            } else {
+                $name = $ua->getBrowserName();
+                $version = $ua->getBrowserVersion();
+            }
+            if ($name == '') {
+                $row['display_name'] = _t('未知');
+            } elseif ($version == '') {
+                $row['display_name'] = $name;
+            } else {
+                $row['display_name'] = $name . ' / ' . $version;
+            }
+        }
+        $this->maybad['list'] = $this->htmlEncode($this->urlDecode($list));
+
+        $this->maybad['rows'] = $this->db->fetchAll($qcount)[0]['count'];
+        
+        $filter = $this->request->get('filter', 'all');
+        $filterOptions = $this->request->get($filter);
+
+        $filterArr = array(
+            'filter' => $filter,
+            $filter => $filterOptions
+        );
+
+        $page = new Access_Page($this->config->pageSize, $this->maybad['rows'], $pagenum, 10, array_merge($filterArr, array(
+            'panel' => Access_Plugin::$panel,
+            'action' => 'maybad',
+            'type' => $type,
+        )));
+        $this->maybad['page'] = $page->show();
+
+        $this->maybad['cidList'] = $this->db->fetchAll($this->db->select('DISTINCT content_id as cid, COUNT(1) as count, table.contents.title')
+                ->from('table.access_log')
+                ->join('table.contents', 'table.access_log.content_id = table.contents.cid')
+                ->where('table.access_log.content_id <> ?', null)
+                ->group('table.access_log.content_id')
+                ->order('count', Typecho_Db::SORT_DESC));
     }
 
     /**
@@ -98,8 +201,9 @@ class Access_Core
                 break;
             case 'path':
                 $path = $this->request->get('path', '');
-                $query->where('path = ?', $path);
-                $qcount->where('path = ?', $path);
+                // 由原来的精确匹配改为模糊匹配
+                $query->where('path like ?', '%'.$path.'%');
+                $qcount->where('path like ?', '%'.$path.'%');
                 break;
         }
         $list = $this->db->fetchAll($query);
